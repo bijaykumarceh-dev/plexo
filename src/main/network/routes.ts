@@ -143,26 +143,19 @@ function attemptOrder(routes: NetworkRoute[], preferred: string | undefined): Ne
 }
 
 /**
- * A socket to `host` through `iface`, racing its compatible routes as RFC 8305 does: whichever
- * completes its handshake first is kept, and the others are dropped. `secure` wraps the TCP
- * socket in TLS before that point, so a route whose TLS handshake never finishes is given up on
- * just like one that never connects.
+ * Races a set of compatible routes as RFC 8305 does: each next address starts ATTEMPT_DELAY_MS
+ * after the one before, unless that one has already failed, and the first to finish its handshake
+ * (`secureConnect` when `secure` wraps the socket) wins. The others are destroyed. Remembers the
+ * winning route so the next connection through this network starts there.
  */
-async function connectOnInterface(
-  iface: NetworkInterfaceInfo,
-  host: string,
+function raceRoutes(
+  routes: NetworkRoute[],
   port: number,
   secure: ((socket: Socket) => Socket) | null,
-  timeoutMs: number,
+  deadline: number,
   signal: AbortSignal,
-  resolveHost?: ResolveHost
+  memory: string
 ): Promise<Socket> {
-  const deadline = Date.now() + timeoutMs
-  const found = routesFor(iface, await resolveTargetWithin(host, timeoutMs, signal, resolveHost))
-  if (found.length === 0) throw new NoCompatibleRouteError(host)
-  const memory = `${iface.id} ${host}:${port}`
-  const routes = attemptOrder(found, lastGoodRoute.get(memory))
-
   return new Promise<Socket>((resolve, reject) => {
     const racing = new Set<{ tcp: Socket; socket: Socket }>()
     let next = 0
@@ -232,6 +225,29 @@ async function connectOnInterface(
     signal.addEventListener('abort', onAbort, { once: true })
     launch()
   })
+}
+
+/**
+ * A socket to `host` through `iface`, racing its compatible routes as RFC 8305 does: whichever
+ * completes its handshake first is kept, and the others are dropped. `secure` wraps the TCP
+ * socket in TLS before that point, so a route whose TLS handshake never finishes is given up on
+ * just like one that never connects.
+ */
+async function connectOnInterface(
+  iface: NetworkInterfaceInfo,
+  host: string,
+  port: number,
+  secure: ((socket: Socket) => Socket) | null,
+  timeoutMs: number,
+  signal: AbortSignal,
+  resolveHost?: ResolveHost
+): Promise<Socket> {
+  const deadline = Date.now() + timeoutMs
+  const found = routesFor(iface, await resolveTargetWithin(host, timeoutMs, signal, resolveHost))
+  if (found.length === 0) throw new NoCompatibleRouteError(host)
+  const memory = `${iface.id} ${host}:${port}`
+  const routes = attemptOrder(found, lastGoodRoute.get(memory))
+  return raceRoutes(routes, port, secure, deadline, signal, memory)
 }
 
 /** What a request passes its agent: Node hands a request's options to the agent's

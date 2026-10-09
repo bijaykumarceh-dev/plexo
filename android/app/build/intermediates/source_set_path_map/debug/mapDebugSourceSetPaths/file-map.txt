@@ -1,0 +1,45 @@
+com.plexo.android.app-lifecycle-runtime-compose-release-0 C:\Users\bijay\.gradle\caches\8.11.1\transforms\0d4fd3db879b46c8d5214edba077e201\transformed\lifecycle-runtime-compose-release\res
+com.plexo.android.app-graphics-path-1.0.1-1 C:\Users\bijay\.gradle\caches\8.11.1\transforms\0edcef74ddb7fbccce427815922e0413\transformed\graphics-path-1.0.1\res
+com.plexo.android.app-activity-ktx-1.10.1-2 C:\Users\bijay\.gradle\caches\8.11.1\transforms\120093ffc4788fd62061238e1afc36f0\transformed\activity-ktx-1.10.1\res
+com.plexo.android.app-ui-release-3 C:\Users\bijay\.gradle\caches\8.11.1\transforms\181e47f6ea4ddde0f7f915bb54909c8f\transformed\ui-release\res
+com.plexo.android.app-ui-unit-release-4 C:\Users\bijay\.gradle\caches\8.11.1\transforms\18816500cccfcc6b026df045ae5fe355\transformed\ui-unit-release\res
+com.plexo.android.app-savedstate-1.2.1-5 C:\Users\bijay\.gradle\caches\8.11.1\transforms\1bd65fc7148ca903fecd1c73c79fa01f\transformed\savedstate-1.2.1\res
+com.plexo.android.app-ui-tooling-release-6 C:\Users\bijay\.gradle\caches\8.11.1\transforms\1f95adfdaf506378ac6de2234b9e9514\transformed\ui-tooling-release\res
+com.plexo.android.app-lifecycle-viewmodel-ktx-2.8.7-7 C:\Users\bijay\.gradle\caches\8.11.1\transforms\1fd9950d06d9d39ab86c45f8eb36546b\transformed\lifecycle-viewmodel-ktx-2.8.7\res
+com.plexo.android.app-ui-text-release-8 C:\Users\bijay\.gradle\caches\8.11.1\transforms\211248d776324ba0ca44533fc37b0e45\transformed\ui-text-release\res
+com.plexo.android.app-activity-compose-1.10.1-9 C:\Users\bijay\.gradle\caches\8.11.1\transforms\2387079ce475786200836da9ac5ec3d7\transformed\activity-compose-1.10.1\res
+com.plexo.android.app-lifecycle-runtime-release-10 C:\Users\bijay\.gradle\caches\8.11.1\transforms\255965c363cd2d2ebc91f6ba57dfd58d\transformed\lifecycle-runtime-release\res
+com.plexo.android.app-ui-util-release-11 C:\Users\bijay\.gradle\caches\8.11.1\transforms\25dd27c7e915236e851decf737180ddf\transformed\ui-util-release\res
+com.plexo.android.app-lifecycle-viewmodel-release-12 C:\Users\bijay\.gradle\caches\8.11.1\transforms\265b2f92aa186bfc972a1a8eb11996ba\transformed\lifecycle-viewmodel-release\res
+com.plexo.android.app-core-ktx-1.15.0-13 C:\Users\bijay\.gradle\caches\8.11.1\transforms\3043750acdf0f11c7496f52439677ef8\transformed\core-ktx-1.15.0\res
+com.plexo.android.app-tracing-1.2.0-14 C:\Users\bijay\.gradle\caches\8.11.1\transforms\3a5a30a2c31ba15bd576ebfa2d79fa0f\transformed\tracing-1.2.0\res
+com.plexo.android.app-material3-release-15 C:\Users\bijay\.gradle\caches\8.11.1\transforms\541d04727beca443a7b2d8b070c2e705\transformed\material3-release\res
+com.plexo.android.app-lifecycle-viewmodel-savedstate-2.8.7-16 C:\Users\bijay\.gradle\caches\8.11.1\transforms\60d891f4ec0ece98b42e339bdb11b5b3\transformed\lifecycle-viewmodel-savedstate-2.8.7\res
+com.plexo.android.app-customview-poolingcontainer-1.0.0-17 C:\Users\bijay\.gradle\caches\8.11.1\transforms\6c817d50ef08ab89e269bb10eade809a\transformed\customview-poolingcontainer-1.0.0\res
+com.plexo.android.app-runtime-release-18 C:\Users\bijay\.gradle\caches\8.11.1\transforms\70c1b0b181970b8d989afd2a91ee2593\transformed\runtime-release\res
+com.plexo.android.app-foundation-layout-release-19 C:\Users\bijay\.gradle\caches\8.11.1\transforms\745d3261a57037f688f337bbbae1305f\transformed\foundation-layout-release\res
+com.plexo.android.app-foundation-release-20 C:\Users\bijay\.gradle\caches\8.11.1\transforms\7efe2c5b8896e84b987c29cd833d7aa5\transformed\foundation-release\res
+com.plexo.android.app-annotation-experimental-1.4.1-21 C:\Users\bijay\.gradle\caches\8.11.1\transforms\8c8fc10d94dfc6f780a5d987b2fd197d\transformed\annotation-experimental-1.4.1\res
+com.plexo.android.app-startup-runtime-1.1.1-22 C:\Users\bijay\.gradle\caches\8.11.1\transforms\8e72b4af0e5abf2abf798bcf82dc833b\transformed\startup-runtime-1.1.1\res
+com.plexo.android.app-runtime-saveable-release-23 C:\Users\bijay\.gradle\caches\8.11.1\transforms\93452990e79b22c5b70df72619873a3f\transformed\runtime-saveable-release\res
+com.plexo.android.app-emoji2-1.4.0-24 C:\Users\bijay\.gradle\caches\8.11.1\transforms\948be177df00aa2ae4559002f92e7e50\transformed\emoji2-1.4.0\res
+com.plexo.android.app-core-runtime-2.2.0-25 C:\Users\bijay\.gradle\caches\8.11.1\transforms\9500762a8cb3ae3c9d0dde33a67dae8a\transformed\core-runtime-2.2.0\res
+com.plexo.android.app-lifecycle-livedata-core-2.8.7-26 C:\Users\bijay\.gradle\caches\8.11.1\transforms\a6c53cf20ae1d58a0a65982378988d5f\transformed\lifecycle-livedata-core-2.8.7\res
+com.plexo.android.app-core-viewtree-1.0.0-27 C:\Users\bijay\.gradle\caches\8.11.1\transforms\ad203cdd5319c2bf891506e542f7e8e7\transformed\core-viewtree-1.0.0\res
+com.plexo.android.app-core-1.15.0-28 C:\Users\bijay\.gradle\caches\8.11.1\transforms\b3f0f4dbbf85814f04fa64062c441afd\transformed\core-1.15.0\res
+com.plexo.android.app-material-icons-core-release-29 C:\Users\bijay\.gradle\caches\8.11.1\transforms\b8caa684bf7ad07c45af7a77cf27a55a\transformed\material-icons-core-release\res
+com.plexo.android.app-lifecycle-process-2.8.7-30 C:\Users\bijay\.gradle\caches\8.11.1\transforms\bf429f89678918aac6b99b2377fdd162\transformed\lifecycle-process-2.8.7\res
+com.plexo.android.app-material-release-31 C:\Users\bijay\.gradle\caches\8.11.1\transforms\c3c508470324076b74a224ebca74cf52\transformed\material-release\res
+com.plexo.android.app-profileinstaller-1.4.0-32 C:\Users\bijay\.gradle\caches\8.11.1\transforms\e64b27b4c0d3fbbcc67b640dbdeb074c\transformed\profileinstaller-1.4.0\res
+com.plexo.android.app-ui-graphics-release-33 C:\Users\bijay\.gradle\caches\8.11.1\transforms\e8976f286847419d04de462b8e20b978\transformed\ui-graphics-release\res
+com.plexo.android.app-savedstate-ktx-1.2.1-34 C:\Users\bijay\.gradle\caches\8.11.1\transforms\eb631b67ae63260bac6e58d075adcb87\transformed\savedstate-ktx-1.2.1\res
+com.plexo.android.app-animation-core-release-35 C:\Users\bijay\.gradle\caches\8.11.1\transforms\eec20434cbe54269599fe035cb9f2835\transformed\animation-core-release\res
+com.plexo.android.app-activity-1.10.1-36 C:\Users\bijay\.gradle\caches\8.11.1\transforms\f00d17bd8415172462c55ab1728c44b6\transformed\activity-1.10.1\res
+com.plexo.android.app-lifecycle-runtime-ktx-release-37 C:\Users\bijay\.gradle\caches\8.11.1\transforms\ff9ffc160f06f345d5ec5439c76594af\transformed\lifecycle-runtime-ktx-release\res
+com.plexo.android.app-pngs-38 H:\github repo\plexo\android\app\build\generated\res\pngs\debug
+com.plexo.android.app-resValues-39 H:\github repo\plexo\android\app\build\generated\res\resValues\debug
+com.plexo.android.app-packageDebugResources-40 H:\github repo\plexo\android\app\build\intermediates\incremental\debug\packageDebugResources\merged.dir
+com.plexo.android.app-packageDebugResources-41 H:\github repo\plexo\android\app\build\intermediates\incremental\debug\packageDebugResources\stripped.dir
+com.plexo.android.app-debug-42 H:\github repo\plexo\android\app\build\intermediates\merged_res\debug\mergeDebugResources
+com.plexo.android.app-debug-43 H:\github repo\plexo\android\app\src\debug\res
+com.plexo.android.app-main-44 H:\github repo\plexo\android\app\src\main\res

@@ -145,11 +145,21 @@ export function downloadChunk(options: ChunkDownloadOptions): Promise<void> {
     let currentReq: ClientRequest | null = null
     let currentFileStream: Writable | null = null
     let stallWatchdog: NodeJS.Timeout | null = null
+    let drainHandler: (() => void) | null = null
 
     const clearWatchdog = (): void => {
       if (stallWatchdog) {
         clearTimeout(stallWatchdog)
         stallWatchdog = null
+      }
+    }
+
+    /** A paused response waiting on the disk wires a 'drain' handler; it must come off again
+     * whenever the chunk settles, or a destroyed writer leaves it attached for good. */
+    const clearDrain = (): void => {
+      if (drainHandler) {
+        currentFileStream?.off('drain', drainHandler)
+        drainHandler = null
       }
     }
 
@@ -164,6 +174,7 @@ export function downloadChunk(options: ChunkDownloadOptions): Promise<void> {
       if (settled) return
       settled = true
       clearWatchdog()
+      clearDrain()
       signal.removeEventListener('abort', onAbort)
       fn()
     }
@@ -196,6 +207,136 @@ export function downloadChunk(options: ChunkDownloadOptions): Promise<void> {
         rangeEnd === null ? `bytes=${rangeStart}-` : `bytes=${rangeStart}-${rangeEnd}`
     }
 
+    /** Checks the response describes the range we asked for before any of it is written, and
+     * writes the body once it does. Nothing here may touch the destination on a rejection. */
+    const pipeBody = (res: IncomingMessage, fileStream: Writable): void => {
+      const dropped = (error: Error): void => fail(asConnectionError(error))
+      res.on('error', dropped)
+      fileStream.on('error', fail)
+
+      // Arm watchdog for incoming body bytes — drops and retries if the server sends
+      // headers then freezes, or goes silent mid-stream.
+      resetWatchdog()
+
+      // Written by hand rather than piped so an overlong body can be cut off
+      // at the range boundary: an overlong response could overwrite the next block.
+      res.on('data', (chunk: Buffer) => {
+        if (settled) return
+        resetWatchdog()
+
+        const remaining = expectedBytes === null ? chunk.length : expectedBytes - bytesDownloaded
+        const usable =
+          chunk.length <= remaining ? chunk : chunk.subarray(0, Math.max(remaining, 0))
+
+        if (usable.length > 0) {
+          bytesDownloaded += usable.length
+          const progress = bytesDownloaded
+          onNetworkProgress(progress)
+          if (
+            !fileStream.write(usable, (error) => {
+              if (error) fail(error)
+              else if (!settled) onProgress(progress)
+            })
+          ) {
+            // Waiting on the disk says nothing about the network: the watchdog stops until
+            // the writer has caught up. The handler is held so settling can take it off again.
+            clearWatchdog()
+            res.pause()
+            drainHandler = (): void => {
+              drainHandler = null
+              if (settled) return
+              resetWatchdog()
+              res.resume()
+            }
+            fileStream.once('drain', drainHandler)
+          }
+        }
+
+        if (usable.length < chunk.length) {
+          fail(new Error('Server sent more data than the requested range'))
+        }
+      })
+
+      res.on('end', () => {
+        if (settled) return
+        clearWatchdog()
+        if (expectedBytes !== null && bytesDownloaded !== expectedBytes) {
+          fail(
+            new Error(`Server returned ${bytesDownloaded} bytes for a ${expectedBytes}-byte range`)
+          )
+          return
+        }
+        // Windows cannot reliably reopen/remove a file until its handle closes.
+        fileStream.once('close', () => finish(resolve))
+        fileStream.end()
+      })
+    }
+
+    /** Rejects a response the chunk must not be written from: a redirect past the limit, a
+     * status that isn't the range asked for, a version that changed, or a 206 whose range
+     * doesn't line up. Resolves it (with the stream to write) when it checks out. */
+    const validateResponse = (
+      res: IncomingMessage,
+      req: ClientRequest,
+      sentAt: number
+    ): Writable | undefined => {
+      const status = res.statusCode ?? 0
+
+      // A 200 is only correct here if we asked from byte 0 — otherwise the
+      // server ignored our Range and we'd silently write the wrong bytes
+      // into this chunk's slot. When the range is also bounded, the
+      // length check at the end of the body is what confirms the server
+      // sent this chunk rather than the whole file.
+      const isValidFullBody = status === 200 && rangeStart === 0
+      if (status !== 206 && !isValidFullBody) {
+        fail(new HttpStatusError(status, retryAfterMs(header(res, 'retry-after'))))
+        res.resume()
+        return undefined
+      }
+
+      // Each range is fetched separately, so a file republished mid-download would otherwise
+      // be stitched together from two versions and still pass every length check.
+      const served = parseContentRange(res.headers['content-range'])
+      const seen = versionOf(res, served)
+      const check = compareVersion(acceptedVersions, seen)
+      if (check.kind !== 'same') {
+        fail(new RemoteChangedError(check, seen))
+        res.resume()
+        return undefined
+      }
+
+      // A 206 says where in the file these bytes belong — check it lines up
+      // with what we asked for before writing any of them.
+      if (status === 206) {
+        if (!served) {
+          fail(new Error('Server sent a 206 without a usable Content-Range header'))
+          res.resume()
+          return undefined
+        }
+        if (served.start !== rangeStart) {
+          fail(
+            new Error(
+              `Server returned the wrong range: asked for byte ${rangeStart}, got ${served.start}`
+            )
+          )
+          res.resume()
+          return undefined
+        }
+        if (rangeEnd !== null && served.end > rangeEnd) {
+          fail(
+            new Error(
+              `Server returned more than the requested range: through byte ${served.end}, asked through ${rangeEnd}`
+            )
+          )
+          res.resume()
+          return undefined
+        }
+      }
+
+      onResponse?.({ ttfbMs: Date.now() - sentAt, reusedSocket: req.reusedSocket })
+      return createDestination()
+    }
+
     const attempt = (targetUrl: URL, redirectsLeft: number): void => {
       void connection
         .request(targetUrl, headers, signal)
@@ -205,11 +346,11 @@ export function downloadChunk(options: ChunkDownloadOptions): Promise<void> {
             return
           }
           currentReq = req
-          // The connection dropping mid-answer; one the server answered wrongly fails below.
-          const dropped = (error: Error): void => fail(asConnectionError(error))
-          req.on('error', dropped)
-          const status = res.statusCode ?? 0
+          // Settling can happen between the promise resolving and this line. The request is
+          // already destroyed by then, so don't let a later fail() reach it again.
+          if (settled) return
 
+          const status = res.statusCode ?? 0
           if (status >= 300 && status < 400) {
             res.resume()
             if (!res.headers.location || redirectsLeft <= 0) {
@@ -220,121 +361,14 @@ export function downloadChunk(options: ChunkDownloadOptions): Promise<void> {
             return
           }
 
-          // A 200 is only correct here if we asked from byte 0 — otherwise the
-          // server ignored our Range and we'd silently write the wrong bytes
-          // into this chunk's slot. When the range is also bounded, the
-          // length check at the end of the body is what confirms the server
-          // sent this chunk rather than the whole file.
-          const isValidFullBody = status === 200 && rangeStart === 0
-          if (status !== 206 && !isValidFullBody) {
-            fail(new HttpStatusError(status, retryAfterMs(header(res, 'retry-after'))))
-            res.resume()
-            return
-          }
+          // The connection dropping mid-answer; one the server answered wrongly fails in
+          // validateResponse.
+          req.on('error', (error: Error) => fail(asConnectionError(error)))
 
-          // Each range is fetched separately, so a file republished mid-download would otherwise
-          // be stitched together from two versions and still pass every length check.
-          const served = parseContentRange(res.headers['content-range'])
-          const seen = versionOf(res, served)
-          const check = compareVersion(acceptedVersions, seen)
-          if (check.kind !== 'same') {
-            fail(new RemoteChangedError(check, seen))
-            res.resume()
-            return
-          }
-
-          // A 206 says where in the file these bytes belong — check it lines up
-          // with what we asked for before writing any of them.
-          if (status === 206) {
-            if (!served) {
-              fail(new Error('Server sent a 206 without a usable Content-Range header'))
-              res.resume()
-              return
-            }
-            if (served.start !== rangeStart) {
-              fail(
-                new Error(
-                  `Server returned the wrong range: asked for byte ${rangeStart}, got ${served.start}`
-                )
-              )
-              res.resume()
-              return
-            }
-            if (rangeEnd !== null && served.end > rangeEnd) {
-              fail(
-                new Error(
-                  `Server returned more than the requested range: through byte ${served.end}, asked through ${rangeEnd}`
-                )
-              )
-              res.resume()
-              return
-            }
-          }
-
-          onResponse?.({ ttfbMs: Date.now() - sentAt, reusedSocket: req.reusedSocket })
-
-          const fileStream = createDestination()
+          const fileStream = validateResponse(res, req, sentAt)
+          if (!fileStream) return
           currentFileStream = fileStream
-
-          res.on('error', dropped)
-          fileStream.on('error', fail)
-
-          // Arm watchdog for incoming body bytes — drops and retries if the server sends
-          // headers then freezes, or goes silent mid-stream.
-          resetWatchdog()
-
-          // Written by hand rather than piped so an overlong body can be cut off
-          // at the range boundary: an overlong response could overwrite the next block.
-          res.on('data', (chunk: Buffer) => {
-            if (settled) return
-            resetWatchdog()
-
-            const remaining =
-              expectedBytes === null ? chunk.length : expectedBytes - bytesDownloaded
-            const usable =
-              chunk.length <= remaining ? chunk : chunk.subarray(0, Math.max(remaining, 0))
-
-            if (usable.length > 0) {
-              bytesDownloaded += usable.length
-              const progress = bytesDownloaded
-              onNetworkProgress(progress)
-              if (
-                !fileStream.write(usable, (error) => {
-                  if (error) fail(error)
-                  else if (!settled) onProgress(progress)
-                })
-              ) {
-                // Waiting on the disk says nothing about the network: the watchdog stops until
-                // the writer has caught up.
-                clearWatchdog()
-                res.pause()
-                fileStream.once('drain', () => {
-                  resetWatchdog()
-                  res.resume()
-                })
-              }
-            }
-
-            if (usable.length < chunk.length) {
-              fail(new Error('Server sent more data than the requested range'))
-            }
-          })
-
-          res.on('end', () => {
-            if (settled) return
-            clearWatchdog()
-            if (expectedBytes !== null && bytesDownloaded !== expectedBytes) {
-              fail(
-                new Error(
-                  `Server returned ${bytesDownloaded} bytes for a ${expectedBytes}-byte range`
-                )
-              )
-              return
-            }
-            // Windows cannot reliably reopen/remove a file until its handle closes.
-            fileStream.once('close', () => finish(resolve))
-            fileStream.end()
-          })
+          pipeBody(res, fileStream)
         })
         .catch(fail)
     }

@@ -2,6 +2,17 @@ import { createWriteStream, type WriteStream } from 'node:fs'
 import { lstat, open, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
 
+/** Whether `path` exists. Only ENOENT means "no"; any other error is the caller's problem. */
+async function exists(path: string): Promise<boolean> {
+  return lstat(path).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false
+      throw error
+    }
+  )
+}
+
 /** The only large file owned by a download. It lives beside the final file so publishing it
  * requires no copy and never needs a second file's worth of disk space. */
 export class DownloadFile {
@@ -60,28 +71,12 @@ export class DownloadFile {
       }
       const candidateStem = candidateCharacters.join('')
       const candidate = join(directory, `${candidateStem}${suffix}${extension}`)
-      if (candidate !== destinationPath) {
-        const partialExists = await lstat(`${candidate}.plexo`).then(
-          () => true,
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === 'ENOENT') return false
-            throw error
-          }
-        )
-        if (partialExists) continue
-      }
+      if (candidate !== destinationPath && (await exists(`${candidate}.plexo`))) continue
       await beforeAttempt(candidate)
       // Check immediately before the rename, after the recovery intent is saved.
       // Node has no portable no-replace rename: another process could still
       // claim this name in the small interval between these two operations.
-      const destinationExists = await lstat(candidate).then(
-        () => true,
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === 'ENOENT') return false
-          throw error
-        }
-      )
-      if (destinationExists) continue
+      if (await exists(candidate)) continue
       try {
         // The partial and final names are in one directory, so this moves the
         // completed bytes into place without copying the file.

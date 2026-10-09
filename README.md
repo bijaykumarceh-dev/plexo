@@ -254,6 +254,23 @@ Start the application in development mode:
 npm run dev
 ```
 
+## Build the Android app
+
+The standalone Android app lives in `android/` and uses Kotlin, Jetpack Compose, and Android's
+network-bound sockets. Install Android Studio with Android SDK 36, JDK 17 or newer, and Gradle
+8.11.1, then run this from the repository root:
+
+```powershell
+gradle -p android :app:assembleDebug
+```
+
+The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. It supports parallel
+HTTP range downloads across selected Wi-Fi, cellular, and Ethernet networks, pause/resume while
+the app process remains alive, remote-file validator checks, live progress, a foreground
+notification, light/dark theme selection, and publishing completed files to `Downloads/Plexo`.
+Desktop-only features such as restart recovery, download history, per-network color customization,
+latency diagnostics, and the detailed chunk/throughput visualizations are not ported yet.
+
 ---
 
 ## Running tests
