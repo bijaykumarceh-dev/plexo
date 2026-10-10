@@ -16,22 +16,27 @@ export interface FileVersion {
 export type VersionCheck =
   { kind: 'same' } | { kind: 'size'; detail: string } | { kind: 'validators'; detail: string }
 
-/** Drops what varies between servers without the bytes changing: the weak-validator marker,
- * the quotes, and the suffix some servers add for a compressed variant (Apache's "-gzip"). */
+/** Drops what varies without the bytes changing: the weak-validator marker and the
+ * quotes. Suffixes like `-gzip` are deliberately kept: a gzip variant is not proven
+ * to be identical bytes until a sample check says so. */
 export function normalizeEtag(etag: string): string {
   return etag
     .trim()
     .replace(/^W\//i, '')
     .replace(/^"(.*)"$/, '$1')
-    .replace(/[-;](gzip|br|deflate|zstd)$/i, '')
+}
+
+function finiteSize(n: number): number {
+  return Number.isFinite(n) && n >= 0 ? n : 0
 }
 
 /** `accepted` is the version the download started on, plus any whose bytes were since
  * confirmed identical to it. */
 export function compareVersion(accepted: FileVersion[], seen: FileVersion): VersionCheck {
-  const expectedSize = accepted[0]?.totalBytes ?? 0
-  if (expectedSize > 0 && seen.totalBytes > 0 && seen.totalBytes !== expectedSize) {
-    return { kind: 'size', detail: `it is now ${seen.totalBytes} bytes instead of ${expectedSize}` }
+  const expectedSize = finiteSize(accepted[0]?.totalBytes ?? 0)
+  const seenSize = finiteSize(seen.totalBytes ?? 0)
+  if (expectedSize > 0 && seenSize > 0 && seenSize !== expectedSize) {
+    return { kind: 'size', detail: `it is now ${seenSize} bytes instead of ${expectedSize}` }
   }
 
   const etags = accepted.flatMap((version) => (version.etag ? [normalizeEtag(version.etag)] : []))

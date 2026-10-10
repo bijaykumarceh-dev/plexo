@@ -73,6 +73,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Android 13+ needs a runtime opt-in or the foreground-service
+        // notification is silently dropped.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+        }
         bindService(Intent(this, DownloadService::class.java), connection, Context.BIND_AUTO_CREATE)
         setContent {
             val bound = service

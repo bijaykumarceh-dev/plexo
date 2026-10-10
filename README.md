@@ -2,7 +2,12 @@
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/anmolkapil)
 
-A fast download manager for Windows, macOS, and Linux that speeds up downloads by pulling chunks in parallel across **multiple network connections at the same time**.
+A fast download manager for Windows, macOS, Linux, and Android. Plexo can speed up supported downloads by pulling file chunks in parallel across **multiple network connections at the same time**.
+
+| App | Status | What it does |
+| --- | --- | --- |
+| Desktop (Windows, macOS, Linux) | Full-featured | Multi-interface downloads, resumable transfers, recovery, detailed stream diagnostics, and network customization. |
+| Android | Early preview | Native Kotlin app with network-bound range downloads, pause/resume, live progress, and a foreground notification. Feature parity with desktop is still in progress. |
 
 For example, if your computer has:
 
@@ -67,6 +72,8 @@ File ──→ Split ─────┤                                  ├─�
 
 ## Features
 
+### Desktop
+
 - 🚀 **Multi-interface, multi-connection downloads** — splits files into chunks of up to 8 MB and fans them out across worker connections bound to specific network interfaces, each kept open from one chunk to the next. Each interface starts with 8 connections and doubles once they are all receiving, up to 32. If the server refuses some (503, 429, 403, or leaves them unanswered), that interface drops to the ones it accepted, then gets one more back each minute without a refusal; a server refusing everything (busy, or an expired link) doesn't lower it. You can also pick a fixed 4, 8, 16 or 32 per interface on the start screen instead of Auto.
 - 🔌 **Hardware interface detection** — queries Windows adapters via PowerShell `Get-NetAdapter` and macOS hardware ports via `networksetup` so Wi-Fi, Ethernet, tethered iPhones, and Thunderbolt bridges are labeled by real device names instead of bare BSD names (`en0`, `en6`).
 - ⚖️ **Dynamic work-stealing queue** — chunks are leased from a shared pending queue; faster networks pull more chunks instead of waiting for slower connections to finish.
@@ -83,6 +90,18 @@ File ──→ Split ─────┤                                  ├─�
 - 🗺️ **Interactive progress grid** — 1:1 visual map of individual chunks, color-coded by the network interface that fetched each chunk with accurate per-network byte attribution.
 - 🎨 **Network customization** — rename and recolor physical network interfaces with persistent user preferences.
 - 🌓 **Light & Dark modes** — full theme support with an instant toggle between light and dark modes.
+
+### Android preview
+
+The standalone Android app is built with Kotlin and Jetpack Compose. It currently supports:
+
+- Detecting active Wi-Fi, cellular, and Ethernet networks, with a choice of which networks to use.
+- HTTP range probing, parallel 8 MB blocks, single-stream fallback, and Auto or fixed connection counts.
+- Pause and resume while the app process remains alive, including `ETag` / `Last-Modified` checks before resuming.
+- Live speed, overall progress, a compact block map, per-network byte totals, and a foreground download notification.
+- Light and dark themes, plus saving completed files to `Downloads/Plexo`.
+
+Android does not yet have desktop's relaunch recovery, download history, live network switching, network rename/color preferences, latency diagnostics, per-stream table, retry/stall controls, or full telemetry and ETA. See [Android app](#android-app) for build, install, and troubleshooting instructions.
 
 ---
 
@@ -223,7 +242,7 @@ Progress Grid:
 
 # Getting started
 
-Plexo currently doesn't have pre-built releases, so you'll need to run it from source.
+Desktop currently has no pre-built releases, so build it from source. A debug APK for the Android preview is committed at `android/app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Requirements
 
@@ -254,22 +273,54 @@ Start the application in development mode:
 npm run dev
 ```
 
-## Build the Android app
+## Android app
 
-The standalone Android app lives in `android/` and uses Kotlin, Jetpack Compose, and Android's
-network-bound sockets. Install Android Studio with Android SDK 36, JDK 17 or newer, and Gradle
-8.11.1, then run this from the repository root:
+The Android app is a separate native app; it does not need the desktop app running. Android routes each request through the selected `Network`, while downloads run in a foreground service.
+
+### Requirements
+
+- Android 8.0 (API 26) or newer.
+- Android SDK Platform 36, JDK 17 or newer, and Gradle 8.11.1 to build from source.
+- Internet access. Combining bandwidth requires distinct working connections; Wi-Fi and mobile data connected to the same upstream do not create extra bandwidth.
+
+### Build
+
+From the repository root, with `ANDROID_HOME` pointing at the Android SDK:
 
 ```powershell
 gradle -p android :app:assembleDebug
 ```
 
-The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. It supports parallel
-HTTP range downloads across selected Wi-Fi, cellular, and Ethernet networks, pause/resume while
-the app process remains alive, remote-file validator checks, live progress, a foreground
-notification, light/dark theme selection, and publishing completed files to `Downloads/Plexo`.
-Desktop-only features such as restart recovery, download history, per-network color customization,
-latency diagnostics, and the detailed chunk/throughput visualizations are not ported yet.
+The debug APK is generated at `android/app/build/outputs/apk/debug/app-debug.apk`. The checked-in APK is a debug build for testing, not a signed production release.
+
+### Install
+
+Copy the APK to the phone and open it, allowing installation from that source when Android asks. With USB debugging enabled, install it from the repository root using:
+
+```powershell
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+The first download on Android 8 or 9 asks for storage permission so Plexo can publish the completed file to `Downloads/Plexo`. Android 10 and newer use the system MediaStore download collection.
+
+### Android behavior and limitations
+
+- The app lists active internet-capable Wi-Fi, cellular, and Ethernet networks. VPN networks are excluded.
+- It checks whether the URL supports byte ranges. Unsupported or unknown-size downloads use one connection.
+- Pause/resume and validator checks work while the app process is alive. If Android kills the process or the phone restarts, the current transfer is not restored yet.
+- The active screen shows aggregate speed, total progress, a block map, and per-network received bytes. It does not yet show desktop's per-stream diagnostics, ETA, latency tests, network customization, or detailed retry controls.
+- Android vendors apply different background and battery policies. Keep Plexo's download notification enabled and allow background activity if the device maker requires it. This preview has been build-verified, but should be tested on each target phone; no universal crash-free guarantee is possible across customized Android builds.
+
+### Troubleshooting a crash
+
+To capture a startup or download crash with a USB-connected phone and Android Platform Tools, run this in PowerShell, then open Plexo and reproduce the problem:
+
+```powershell
+adb logcat -c
+adb logcat -d -v time AndroidRuntime:E '*:S'
+```
+
+Share the `FATAL EXCEPTION` block along with the phone model and Android version. It identifies the failing Android API or device-specific behavior.
 
 ---
 

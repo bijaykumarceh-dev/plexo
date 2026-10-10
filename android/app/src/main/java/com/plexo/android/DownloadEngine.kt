@@ -64,6 +64,26 @@ class DownloadEngine(private val context: Context) {
     private var request: RunRequest? = null
     private var completedBlocks = mutableSetOf<Int>()
     private var stageFile: File? = null
+    // Serializes start/pause/resume/run so rapid taps can't orphan a job and
+    // leave two perform() writers interleaving on the same RandomAccessFile.
+    private val controlMutex = Mutex()
+
+    /** Desktop parity sanitize: one component, never a path; strips RTL
+     * overrides, control chars and reserved names; caps length. */
+    private fun sanitizeFileName(raw: String): String {
+        var safe = raw
+            .replace(Regex("[\u202A-\u202E\u200E\u200F\u2066-\u2069]"), "")
+            .replace(Regex("[\\\\/]"), "_")
+            .replace(Regex("\\p{Cc}"), "_")
+            .trim()
+        safe = safe.replace(Regex("[<>:\"|?*]"), "_").trimEnd(' ', '.')
+        if (safe.isEmpty() || safe.matches(Regex("^\\.+$")) || safe == ".." || safe == ".") return "download"
+        if (safe.matches(Regex("(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\..*)?$"))) safe = "_$safe"
+        if (safe.length > 180) safe = safe.take(180).trim().ifEmpty { "download" }
+        return safe
+    }
+
+    private fun isHttpUrl(url: URL): Boolean = url.protocol == "http" || url.protocol == "https"
 
     private fun AtomicLongArray.sumBytes(): Long = (0 until length()).sumOf { get(it) }
 
@@ -103,10 +123,12 @@ class DownloadEngine(private val context: Context) {
     suspend fun probe(urlText: String, network: Network?): ProbeInfo = withContext(Dispatchers.IO) {
         val url = URL(urlText.trim())
         require(url.protocol == "https" || url.protocol == "http") { "Enter a valid HTTP or HTTPS URL." }
+        require(urlText.trim().length <= 8000) { "That URL is too long." }
         var current = url
         var connection: HttpURLConnection? = null
         try {
             repeat(6) { hop ->
+                require(isHttpUrl(current)) { "The server redirected to an unsupported address." }
                 val opened = (network?.openConnection(current) ?: current.openConnection()) as HttpURLConnection
                 connection = opened
                 opened.instanceFollowRedirects = false
@@ -119,28 +141,41 @@ class DownloadEngine(private val context: Context) {
                     val location = opened.getHeaderField("Location")
                         ?: error("The server returned a redirect without a destination.")
                     if (hop == 5) error("Too many redirects.")
-                    current = URL(current, location)
+                    val next = URL(current, location)
+                    require(isHttpUrl(next)) { "The server redirected to an unsupported address." }
+                    if (current.protocol == "https" && next.protocol != "https") {
+                        error("The server tried to redirect a secure download to an insecure address.")
+                    }
+                    current = next
                     opened.disconnect()
                     connection = null
                     return@repeat
                 }
-                if (code !in 200..299) error("Server returned HTTP $code.")
+                if (code !in 200..299) {
+                    if (code == 401) error("This link needs a login (401). Open it in a browser first.")
+                    if (code == 404) error("The file was not found (404). The link may have expired.")
+                    error("Server returned HTTP $code.")
+                }
                 val contentRange = opened.getHeaderField("Content-Range")
-                val rangeSize = Regex("/([0-9]+)$").find(contentRange.orEmpty())?.groupValues?.get(1)?.toLongOrNull()
-                val total = rangeSize ?: opened.getHeaderFieldLong("Content-Length", 0L)
+                val rangeSize = Regex("/([0-9]+)$").find(contentRange.orEmpty())?.groupValues?.get(1)?.toLongOrNull()?.takeIf { it >= 0 }
+                val rawLength = opened.getHeaderField("Content-Length")?.trim()?.toLongOrNull()?.takeIf { it >= 0 } ?: 0L
+                val total = rangeSize ?: rawLength
                 val disposition = opened.getHeaderField("Content-Disposition").orEmpty()
                 val fromHeader = Regex("filename\\*=UTF-8''([^;]+)|filename=\"?([^\";]+)", RegexOption.IGNORE_CASE)
                     .find(disposition)?.let { it.groups[1]?.value ?: it.groups[2]?.value }
-                val fileName = (fromHeader?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-                    ?: current.path.substringAfterLast('/').ifBlank { "download" })
-                    .substringAfterLast('/').replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                val decoded = try {
+                    fromHeader?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+                } catch (_: Exception) { fromHeader }
+                val fileName = sanitizeFileName(
+                    decoded ?: current.path.substringAfterLast('/').ifBlank { "download" }
+                )
                 return@withContext ProbeInfo(
                     url = current.toString(),
                     fileName = fileName,
                     totalBytes = total,
                     supportsRanges = code == HttpURLConnection.HTTP_PARTIAL && rangeSize != null,
-                    etag = opened.getHeaderField("ETag"),
-                    lastModified = opened.getHeaderField("Last-Modified")
+                    etag = opened.getHeaderField("ETag")?.take(500),
+                    lastModified = opened.getHeaderField("Last-Modified")?.take(200)
                 )
             }
             error("Could not check this URL.")
@@ -151,53 +186,87 @@ class DownloadEngine(private val context: Context) {
 
     fun start(probe: ProbeInfo, networks: List<AndroidNetwork>, streamsPerNetwork: Int) {
         require(networks.isNotEmpty()) { "Select at least one network." }
+        require(isHttpUrl(URL(probe.url))) { "Only HTTP and HTTPS links are supported." }
         scope.launch {
-            job?.cancelAndJoin()
-            val next = RunRequest(probe, networks, streamsPerNetwork.coerceIn(0, 32))
-            request = next
-            if (stageFile == null) {
-                val safeName = probe.fileName.ifBlank { "download" }
+            controlMutex.withLock {
+                job?.cancelAndJoin()
+                val next = RunRequest(probe, networks, streamsPerNetwork.coerceIn(0, 32))
+                request = next
+                // Always start fresh: reusing an old stage file with stale
+                // completedBlocks corrupts offsets when the new file differs.
+                stageFile?.delete()
+                val safeName = sanitizeFileName(probe.fileName.ifBlank { "download" })
+                val cleanProbe = probe.copy(fileName = safeName)
                 stageFile = File(context.getExternalFilesDir(null) ?: context.filesDir, "$safeName.plexo")
                 completedBlocks.clear()
+                // Upfront disk-space guard (desktop parity): fail fast, not mid-write.
+                if (cleanProbe.totalBytes > 0) {
+                    try {
+                        val dir = stageFile!!.parentFile ?: context.filesDir
+                        val stat = android.os.StatFs(dir.absolutePath)
+                        val free = stat.availableBytes
+                        if (free < cleanProbe.totalBytes) {
+                            mutableState.value = mutableState.value.copy(
+                                status = "error",
+                                error = "Not enough disk space for this download."
+                            )
+                            request = next.copy(probe = cleanProbe)
+                            return@withLock
+                        }
+                    } catch (_: Exception) { /* best-effort: download will surface ENOSPC */ }
+                }
+                request = next.copy(probe = cleanProbe)
+                run(next.copy(probe = cleanProbe))
             }
-            run(next)
         }
     }
 
     fun pause() {
         scope.launch {
-            job?.cancelAndJoin()
-            mutableState.value = mutableState.value.copy(status = "paused", speedBytesPerSecond = 0)
+            controlMutex.withLock {
+                job?.cancelAndJoin()
+                mutableState.value = mutableState.value.copy(status = "paused", speedBytesPerSecond = 0)
+            }
         }
     }
 
     fun resume() {
         val saved = request ?: return
         scope.launch {
-            job?.cancelAndJoin()
-            if (saved.probe.etag != null || saved.probe.lastModified != null) {
+            controlMutex.withLock {
+                job?.cancelAndJoin()
                 try {
                     val current = probe(saved.probe.url, saved.networks.firstOrNull()?.network)
-                    if ((saved.probe.etag != null && current.etag != saved.probe.etag) ||
-                        (saved.probe.lastModified != null && current.lastModified != saved.probe.lastModified)
-                    ) error("The remote file changed. Start a new download to avoid a corrupted file.")
+                    val etagChanged = saved.probe.etag != null && current.etag != saved.probe.etag
+                    val dateChanged = saved.probe.lastModified != null && current.lastModified != saved.probe.lastModified
+                    val sizeChanged = saved.probe.totalBytes > 0 && current.totalBytes > 0 &&
+                        current.totalBytes != saved.probe.totalBytes
+                    if (etagChanged || dateChanged || sizeChanged) {
+                        error("The remote file changed. Start a new download to avoid a corrupted file.")
+                    }
+                    // Both validators missing + unknown size: nothing proves it is the same file.
+                    if (saved.probe.etag == null && saved.probe.lastModified == null && saved.probe.totalBytes <= 0) {
+                        error("Cannot safely resume: the server gave no version info. Start the download over.")
+                    }
                 } catch (error: Exception) {
                     mutableState.value = mutableState.value.copy(status = "error", error = error.message)
-                    return@launch
+                    return@withLock
                 }
+                run(saved)
             }
-            run(saved)
         }
     }
 
     fun cancel() {
         scope.launch {
-            job?.cancelAndJoin()
-            stageFile?.delete()
-            stageFile = null
-            completedBlocks.clear()
-            request = null
-            mutableState.value = DownloadUiState()
+            controlMutex.withLock {
+                job?.cancelAndJoin()
+                stageFile?.delete()
+                stageFile = null
+                completedBlocks.clear()
+                request = null
+                mutableState.value = DownloadUiState()
+            }
         }
     }
 
@@ -328,7 +397,13 @@ class DownloadEngine(private val context: Context) {
         }
         try {
             val code = connection.responseCode
+            if (code == 401) error("This link needs a login (401). Open it in a browser first.")
+            if (code == 404) error("The file was not found (404). The link may have expired.")
             if ((end != null && code != HttpURLConnection.HTTP_PARTIAL) || code !in 200..299) {
+                val retryAfter = retryAfterMillis(connection.getHeaderField("Retry-After"))
+                if (retryAfter != null && retryAfter > 0) {
+                    try { kotlinx.coroutines.delay(retryAfter.coerceAtMost(60_000L)) } catch (_: Exception) { }
+                }
                 error("${network.label}: server returned HTTP $code.")
             }
             if (end == null && code == HttpURLConnection.HTTP_PARTIAL) {
@@ -376,6 +451,18 @@ class DownloadEngine(private val context: Context) {
         }
     }
 
+    private fun retryAfterMillis(header: String?): Long? {
+        if (header.isNullOrBlank()) return null
+        val trimmed = header.trim()
+        trimmed.toLongOrNull()?.let { if (it >= 0) return it * 1000L else return null }
+        trimmed.toDoubleOrNull()?.let { if (it >= 0) return (it * 1000).toLong() else return null }
+        return try {
+            val date = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", java.util.Locale.US)
+                .parse(trimmed)?.time ?: return null
+            maxOf(0L, date - System.currentTimeMillis())
+        } catch (_: Exception) { null }
+    }
+
     private fun networkProgress(
         networks: List<AndroidNetwork>,
         bytesByNetwork: Map<String, AtomicLong>
@@ -416,7 +503,9 @@ class DownloadEngine(private val context: Context) {
         val folder = File(downloads, "Plexo")
         if (!folder.exists() && !folder.mkdirs()) error("Could not create the Plexo folder in Downloads.")
 
-        val safeName = fileName.ifBlank { "download" }
+        val safeName = sanitizeFileName(fileName.ifBlank { "download" })
+        // Never escape the Plexo folder, even if a stale probe carried "..".
+        require(!safeName.contains('/') && !safeName.contains('\\')) { "Invalid file name." }
         val extension = safeName.substringAfterLast('.', "").takeIf { it.isNotEmpty() }
         val stem = if (extension == null) safeName else safeName.removeSuffix(".$extension")
         var destination = File(folder, safeName)

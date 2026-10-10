@@ -53,13 +53,23 @@ export class HttpStatusError extends Error {
   get transient(): boolean {
     return [408, 429, 500, 502, 503, 504].includes(this.status)
   }
+
+  /** Statuses that must never be retried as "network errors": the request itself is wrong
+   * (needs login, file gone, range unsatisfiable). Retrying only hammers the server. */
+  get failFast(): boolean {
+    return [401, 403, 404].includes(this.status)
+  }
 }
 
-/** Retry-After (RFC 9110 §10.2.3), in seconds or as an HTTP date, as milliseconds from now. */
+/** Retry-After (RFC 9110 §10.2.3), in seconds (integer or decimal) or as an HTTP date,
+ * as milliseconds from now. */
 export function retryAfterMs(value: string | undefined, now = Date.now()): number | null {
   if (!value) return null
   const trimmed = value.trim()
-  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const seconds = Number(trimmed)
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null
+  }
   const at = Date.parse(trimmed)
   return Number.isNaN(at) ? null : Math.max(0, at - now)
 }
@@ -90,7 +100,9 @@ function parseContentRange(value: string | string[] | undefined): ServedRange | 
   const start = Number(match[1])
   const end = Number(match[2])
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
-  return { start, end, total: match[3] === '*' ? null : Number(match[3]) }
+  const total = match[3] === '*' ? null : Number(match[3])
+  if (total !== null && (!Number.isFinite(total) || total < 0)) return null
+  return { start, end, total }
 }
 
 function header(res: IncomingMessage, name: string): string | undefined {
@@ -102,11 +114,30 @@ function header(res: IncomingMessage, name: string): string | undefined {
  * Content-Range; a 200 is the whole file, so its length is the size. */
 function versionOf(res: IncomingMessage, served: ServedRange | null): FileVersion {
   const length = header(res, 'content-length')
+  let total = served?.total ?? 0
+  if (served?.total == null && res.statusCode === 200 && length) {
+    const n = Number(length.trim())
+    total = Number.isFinite(n) && n >= 0 ? n : 0
+  }
+  if (!Number.isFinite(total) || total < 0) total = 0
   return {
     etag: header(res, 'etag') ?? null,
     lastModified: header(res, 'last-modified') ?? null,
-    totalBytes: served?.total ?? (res.statusCode === 200 && length ? Number(length) : 0)
+    totalBytes: total
   }
+}
+
+/** Validates a redirect hop: same http(s)-only rule as the probe, plus no
+ * silent https → http downgrade and no scheme jump. */
+function nextRedirectUrl(location: string, base: URL): URL {
+  const next = new URL(location, base)
+  if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+    throw new Error('The server redirected to an unsupported address')
+  }
+  if (base.protocol === 'https:' && next.protocol !== 'https:') {
+    throw new Error('The server tried to redirect a secure download to an insecure address')
+  }
+  return next
 }
 
 /**
@@ -357,7 +388,14 @@ export function downloadChunk(options: ChunkDownloadOptions): Promise<void> {
               fail(new Error('Too many redirects for range request'))
               return
             }
-            attempt(new URL(res.headers.location, targetUrl), redirectsLeft - 1)
+            let next: URL
+            try {
+              next = nextRedirectUrl(res.headers.location, targetUrl)
+            } catch (error) {
+              fail(error as Error)
+              return
+            }
+            attempt(next, redirectsLeft - 1)
             return
           }
 
@@ -394,7 +432,11 @@ export function fetchRange(
           const status = res.statusCode ?? 0
           if (status >= 300 && status < 400 && res.headers.location && redirectsLeft > 0) {
             res.resume()
-            attempt(new URL(res.headers.location, target), redirectsLeft - 1)
+            try {
+              attempt(nextRedirectUrl(res.headers.location, target), redirectsLeft - 1)
+            } catch (error) {
+              reject(error)
+            }
             return
           }
           const served = parseContentRange(res.headers['content-range'])

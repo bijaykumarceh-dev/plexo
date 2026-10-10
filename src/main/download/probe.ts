@@ -24,9 +24,18 @@ interface ProbeResponse {
   headers: Headers
 }
 
+/** Only http(s) URLs may be fetched. Anything else (file:, ftp:, custom schemes)
+ * falls through to a plain HTTP request today — block it here instead. */
+export function assertHttpUrl(url: URL): void {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Only HTTP and HTTPS links are supported')
+  }
+}
+
 /** GET with a 1-byte range: cheaper than fetching the body, and unlike HEAD it
  * also tells us (via the 206 status) whether range requests actually work. */
 function requestOneByte(url: URL, deadline: number): Promise<ProbeResponse> {
+  assertHttpUrl(url)
   return new Promise((resolve, reject) => {
     const requester = url.protocol === 'https:' ? httpsRequest : httpRequest
     const req = requester(
@@ -95,7 +104,7 @@ function fileNameFromHeaders(headers: Headers, url: URL): string {
   const disposition = headerValue(headers, 'content-disposition')
   if (disposition) {
     const parsed = parseContentDispositionFilename(disposition)
-    if (parsed) return parsed
+    if (parsed) return sanitizeProbedName(parsed)
   }
   let pathname = url.pathname
   try {
@@ -104,13 +113,35 @@ function fileNameFromHeaders(headers: Headers, url: URL): string {
     // A malformed %-escape: the raw path still names the file well enough.
   }
   const base = pathname.split('/').filter(Boolean).pop()
-  return base && base.length > 0 ? base : 'download'
+  return sanitizeProbedName(base && base.length > 0 ? base : 'download')
+}
+
+/** Early sanitize for a server-provided name shown in the UI and sent over IPC.
+ * The final on-disk sanitize still happens in paths.ts — this only stops
+ * `../`, RTL overrides and control chars from ever leaving the probe. */
+function sanitizeProbedName(raw: string): string {
+  let safe = raw
+    .replace(/[\u202A-\u202E\u200E\u200F\u2066-\u2069]/g, '')
+    .replace(/[\\/]/g, '_')
+    .replace(/\p{Cc}/gu, '_')
+    .trim()
+  if (safe.length === 0 || /^\.+$/.test(safe)) return 'download'
+  // Keep the UI/IPC payload bounded; paths.ts enforces the 255-byte disk limit.
+  if (safe.length > 180) safe = safe.slice(0, 180).trim() || 'download'
+  return safe
+}
+
+function toFiniteOrNull(value: string | null | undefined): number | null {
+  if (value == null || value === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 async function requestFollowingRedirects(
   rawUrl: string
 ): Promise<{ current: URL; response: ProbeResponse | null }> {
   let current = new URL(rawUrl)
+  assertHttpUrl(current)
   let response: ProbeResponse | null = null
   const deadline = Date.now() + PROBE_TIMEOUT_MS
 
@@ -119,7 +150,14 @@ async function requestFollowingRedirects(
     if (response.statusCode >= 300 && response.statusCode < 400) {
       const location = headerValue(response.headers, 'location')
       if (!location) break
-      current = new URL(location, current)
+      const next = new URL(location, current)
+      assertHttpUrl(next)
+      // Never silently downgrade an https download to plain http:
+      // signed-URL tokens and Range headers would leak in cleartext.
+      if (current.protocol === 'https:' && next.protocol !== 'https:') {
+        throw new Error('The server tried to redirect a secure download to an insecure address')
+      }
+      current = next
       continue
     }
     break
@@ -162,13 +200,13 @@ export async function probeUrl(rawUrl: string): Promise<ProbeResult> {
   let totalBytes: number | null = null
   if (contentRange) {
     const match = /\/(\d+)$/.exec(contentRange)
-    if (match) totalBytes = Number(match[1])
+    if (match) totalBytes = toFiniteOrNull(match[1])
   }
   if (totalBytes === null && response.statusCode === 200) {
     // Only trust Content-Length on a full (200) response — on a 206 it
     // describes the single byte we asked for, not the whole file.
     const contentLength = headerValue(response.headers, 'content-length')
-    if (contentLength) totalBytes = Number(contentLength)
+    if (contentLength) totalBytes = toFiniteOrNull(contentLength.trim())
   }
 
   return {

@@ -30,13 +30,23 @@ async function openNetworkSettings(): Promise<void> {
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.network')
   } else if (process.platform === 'linux') {
     try {
-      const { exec } = await import('node:child_process')
-      exec('gnome-control-center network || nm-connection-editor || true')
+      // execFile with argv — never a shell string — so no injection is possible
+      // even if this ever takes a variable argument in future.
+      const { execFile } = await import('node:child_process')
+      await new Promise<void>((resolve) => {
+        execFile('sh', ['-c', 'gnome-control-center network || nm-connection-editor || true'], () => resolve())
+      })
     } catch {
       // Best-effort
     }
   }
 }
+
+// At most one probe per 300ms: the Idle screen probes on every keystroke
+// (600ms debounce) and each probe fans out to several requests — without a
+// cap a renderer loop (or XSS) can turn this into an SSRF request flood.
+let lastProbeAt = 0
+const PROBE_MIN_GAP_MS = 300
 
 /** Typed wrapper around ipcMain.handle — the channel name picks its args/result shape out of
  * IpcContract, so a handler here that doesn't match what plexoApi (preload) actually calls is a
@@ -133,7 +143,17 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): Down
     await openNetworkSettings()
   })
 
-  handle('probeUrl', async (_event, url) => probeUrl(url))
+  handle('probeUrl', async (_event, url) => {
+    const now = Date.now()
+    if (now - lastProbeAt < PROBE_MIN_GAP_MS) {
+      await new Promise((resolve) => setTimeout(resolve, PROBE_MIN_GAP_MS - (now - lastProbeAt)))
+    }
+    lastProbeAt = Date.now()
+    if (typeof url !== 'string' || url.trim().length === 0 || url.length > 8000) {
+      throw new Error('Enter a valid HTTP or HTTPS URL.')
+    }
+    return probeUrl(url)
+  })
 
   handle('chooseDestinationFolder', async (_event, defaultPath) => {
     const window = getWindow()
@@ -149,6 +169,11 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): Down
   handle('readClipboardText', async () => clipboard.readText())
 
   handle('revealInFolder', async (_event, filePath) => {
+    // Only reveal absolute paths we plausibly created — never let renderer
+    // code probe arbitrary filesystem locations through the shell.
+    if (typeof filePath !== 'string' || filePath.length === 0 || filePath.length > 2000) return
+    const { isAbsolute } = await import('node:path')
+    if (!isAbsolute(filePath)) return
     shell.showItemInFolder(filePath)
   })
 

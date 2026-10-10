@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { readFile, readdir, rename, rm, stat, statfs, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join, resolve, sep } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { app, Notification, powerSaveBlocker } from 'electron'
 import { IpcChannels } from '../../shared/ipc-channels'
@@ -452,20 +452,32 @@ function formatGigabytes(bytes: number): string {
 
 /** The staging file is on the destination volume and becomes the final file by rename. */
 async function ensureDiskSpace(destinationDir: string, requiredBytes: number): Promise<void> {
-  if (requiredBytes <= 0) return // unknown size — nothing to check against
+  if (!Number.isFinite(requiredBytes) || requiredBytes <= 0) return // unknown size — nothing to check against
   const stats = await statfs(destinationDir)
   const availableBytes = stats.bavail * stats.bsize
-  if (availableBytes < requiredBytes) {
+  if (!Number.isFinite(availableBytes) || availableBytes < requiredBytes) {
     throw new Error(
-      `Not enough disk space: this download needs ${formatGigabytes(requiredBytes)} but only ${formatGigabytes(availableBytes)} is free`
+      `Not enough disk space: this download needs ${formatGigabytes(requiredBytes)} but only ${formatGigabytes(Number.isFinite(availableBytes) ? availableBytes : 0)} is free`
     )
   }
+}
+
+/** Confines a manifest-provided path before any file I/O: it must be a `.plexo`
+ * staging path inside our own downloads root, never an arbitrary location. */
+function isConfinedStagingPath(partialPath: string, downloadsRoot: string): boolean {
+  if (typeof partialPath !== 'string' || !partialPath.endsWith('.plexo')) return false
+  const root = resolve(downloadsRoot) + sep
+  return resolve(partialPath).startsWith(root)
 }
 
 export class DownloadManager {
   private runtimes = new Map<string, DownloadRuntime>()
   private readonly initialization: Promise<void>
   private suspending = false
+  /** Resume calls currently verifying/winding down, by download id.
+   * Guards the double-click race where two resume() calls both await the old
+   * runPromise and then both assign runPromise = run(), starting two loops. */
+  private resumeInFlight = new Set<string>()
   /** Each network's addresses as last seen, by id: what tells a network that has changed. */
   private seenAddresses = new Map<string, string[]>()
   /** The powerSaveBlocker keeping the computer awake while a download runs (see keepAwake). */
@@ -507,6 +519,9 @@ export class DownloadManager {
             await readFile(this.manifestPath(id), 'utf-8')
           ) as PersistedDownload
           if (persisted.state.id !== id) return
+          // A user-writable manifest must never point us at an arbitrary file:
+          // only our own staging paths are honored, anything else is dropped.
+          if (!isConfinedStagingPath(persisted.partialPath, this.downloadsRoot())) return
           const blocks =
             persisted.version === 5
               ? restoreBlocks(persisted.state, persisted)
@@ -651,12 +666,45 @@ export class DownloadManager {
       throw new Error('A download is already in progress — finish or remove it first.')
     }
 
+    // Validate the renderer-supplied DTO in main (never trust the renderer):
+    // scheme allow-list, absolute destination, bounded filename/validators.
+    let target: URL
+    try {
+      target = new URL(requestPayload.url)
+    } catch {
+      throw new Error('Enter a valid HTTP or HTTPS URL.')
+    }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      throw new Error('Only HTTP and HTTPS links are supported')
+    }
+    if (!requestPayload.destinationDir || typeof requestPayload.destinationDir !== 'string') {
+      throw new Error('Pick a valid download folder first')
+    }
+    if (!isAbsolute(requestPayload.destinationDir)) {
+      throw new Error('The download folder must be an absolute path')
+    }
+    if (!requestPayload.suggestedFileName || requestPayload.suggestedFileName.trim().length === 0) {
+      throw new Error('The server did not provide a usable file name')
+    }
+    if (requestPayload.suggestedFileName.length > 500) {
+      requestPayload.suggestedFileName = requestPayload.suggestedFileName.slice(0, 500)
+    }
+    if (!Number.isFinite(requestPayload.totalBytes) || requestPayload.totalBytes < 0) {
+      requestPayload.totalBytes = 0
+    }
+    if (requestPayload.etag && requestPayload.etag.length > 500) {
+      requestPayload.etag = requestPayload.etag.slice(0, 500)
+    }
+    if (requestPayload.lastModified && requestPayload.lastModified.length > 200) {
+      requestPayload.lastModified = requestPayload.lastModified.slice(0, 200)
+    }
+
     const available = await this.networks.refresh()
     const selected = available.filter((iface) => requestPayload.interfaceIds.includes(iface.id))
     if (selected.length === 0) {
       throw new Error('Select at least one network interface')
     }
-    const target = new URL(requestPayload.url)
+    // `target` already validated above — reuse it instead of re-parsing.
     // A selected network that can't reach the host's address family starts switched off.
     const usable = compatibleInterfaces(
       selected,
@@ -757,8 +805,12 @@ export class DownloadManager {
     if (!runtime) return
     const { status, resumable } = runtime.state
     if (status !== 'paused' && !(status === 'error' && resumable !== false)) return
+    if (this.resumeInFlight.has(id)) return
+    this.resumeInFlight.add(id)
 
-    void this.resumeAfterVerifying(runtime, false)
+    void this.resumeAfterVerifying(runtime, false).finally(() => {
+      this.resumeInFlight.delete(id)
+    })
   }
 
   // A file that changed on the server while this download was paused is caught by the first
@@ -856,7 +908,11 @@ export class DownloadManager {
     this.pushUpdate(runtime)
     // Switched back on while the pause is still winding down, it resumes once that is done.
     if (enabled && status === 'paused' && runtime.pausedForNoNetwork) {
-      void this.resumeAfterVerifying(runtime, true)
+      if (this.resumeInFlight.has(id)) return
+      this.resumeInFlight.add(id)
+      void this.resumeAfterVerifying(runtime, true).finally(() => {
+        this.resumeInFlight.delete(id)
+      })
     }
   }
 
@@ -1735,6 +1791,21 @@ export class DownloadManager {
     // with no way through. It stops being used, bar one stream that keeps trying (see reconcile).
     if (error instanceof ConnectionError && this.markUnreachable(runtime, network, Date.now())) {
       this.reconcile(runtime)
+    }
+
+    // Fail fast, never retry: login required (401), forbidden/gone (403/404).
+    // Retrying these as "network errors" only hammers the server and misleads
+    // the user with "No network could reach" instead of the real cause.
+    if (error instanceof HttpStatusError && error.failFast) {
+      const reason =
+        error.status === 401
+          ? 'This link needs a login (server returned 401). Plexo does not send cookies or passwords yet — open it in a browser first.'
+          : error.status === 404
+            ? 'The file was not found on the server (404). The link may have expired.'
+            : `The server refused this download (${error.status}). The link may have expired or need permission.`
+      this.letGo(runtime, chunk, self, attempt, deliveredNothing)
+      this.failDownload(runtime, reason, false)
+      return 'stop'
     }
 
     // A hedge is optional work: its failure isn't retried, and what it did write stays.

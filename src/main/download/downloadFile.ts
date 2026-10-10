@@ -1,5 +1,5 @@
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { lstat, open, rename, rm, stat } from 'node:fs/promises'
+import { link, lstat, open, rename, rm, stat, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
 
 /** Whether `path` exists. Only ENOENT means "no"; any other error is the caller's problem. */
@@ -20,6 +20,8 @@ export class DownloadFile {
 
   /** Every writer has its own descriptor and explicit offset. Never use append mode here. */
   writer(position: number): WriteStream {
+    // The staging path is claimed with O_EXCL at reserve time and never follows
+    // a user-supplied symlink: restore paths are confined before constructing.
     return createWriteStream(this.path, { flags: 'r+', start: position })
   }
 
@@ -73,24 +75,38 @@ export class DownloadFile {
       const candidate = join(directory, `${candidateStem}${suffix}${extension}`)
       if (candidate !== destinationPath && (await exists(`${candidate}.plexo`))) continue
       await beforeAttempt(candidate)
-      // Check immediately before the rename, after the recovery intent is saved.
-      // Node has no portable no-replace rename: another process could still
-      // claim this name in the small interval between these two operations.
-      if (await exists(candidate)) continue
+      // Atomically claim the name without ever overwriting: link() fails with
+      // EEXIST when someone else already owns it (POSIX rename would silently
+      // replace it). Then remove the staging name, leaving only the final one.
       try {
-        // The partial and final names are in one directory, so this moves the
-        // completed bytes into place without copying the file.
-        await rename(this.path, candidate)
-        return candidate
+        await link(this.path, candidate)
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
-        throw error
+        // Filesystems without hardlinks (some exFAT/FAT mounts, cross-device):
+        // fall back to the guarded rename below.
+        if ((error as NodeJS.ErrnoException).code !== 'EPERM' && (error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
+        // Check immediately before the rename, after the recovery intent is saved.
+        if (await exists(candidate)) continue
+        try {
+          await rename(this.path, candidate)
+          return candidate
+        } catch (renameError) {
+          if ((renameError as NodeJS.ErrnoException).code === 'EEXIST') continue
+          throw renameError
+        }
       }
+      await unlink(this.path).catch(() => {})
+      return candidate
     }
     throw new Error('Could not find an unused file name for this download')
   }
 
   async discard(): Promise<void> {
+    // Never delete anything but our own staging file: a crafted manifest path
+    // must not turn cancel/remove into an arbitrary-file delete.
+    if (!this.path.endsWith('.plexo')) {
+      throw new Error('Refusing to delete a file that is not a download staging file')
+    }
     await rm(this.path, { force: true })
   }
 }

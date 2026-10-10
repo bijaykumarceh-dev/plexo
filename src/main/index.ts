@@ -40,6 +40,13 @@ function createWindow(): void {
       : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      // Explicit hardening (never rely on Electron defaults): no Node in the
+      // renderer, isolated context, real sandbox, no downgrade to http.
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
       // A hidden e2e window would otherwise have its timers throttled.
       backgroundThrottling: !testKnobs.hideWindow
     }
@@ -70,6 +77,14 @@ function createWindow(): void {
 
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.plexo.app')
+
+  // Never die silently: log crashes instead of vanishing with no error shown.
+  process.on('uncaughtException', (error) => {
+    console.error('[plexo] uncaught exception', error)
+  })
+  process.on('unhandledRejection', (reason) => {
+    console.error('[plexo] unhandled rejection', reason)
+  })
 
   // A failed move keeps the old file, to retry next launch — it must never stop the window opening.
   await migrateLegacyNetworkPreferences().catch((error) =>
@@ -103,10 +118,11 @@ app.on('before-quit', (event) => {
 
   event.preventDefault()
 
-  // Guarantee the process exits even if suspending hangs
+  // Guarantee the process exits even if suspending hangs. Publishing (flush +
+  // rename) needs a few seconds on big files, so allow longer than a pause.
   const forceQuitTimeout = setTimeout(() => {
     app.exit(0)
-  }, 3000)
+  }, 10_000)
 
   void downloadManager.suspendAll().finally(() => {
     clearTimeout(forceQuitTimeout)

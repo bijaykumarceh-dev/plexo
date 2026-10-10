@@ -1,6 +1,6 @@
 import { app } from 'electron'
-import { lstat, mkdir, open, rm, stat } from 'node:fs/promises'
-import { basename, extname, join } from 'node:path'
+import { lstat, mkdir, open, realpath, rm, stat } from 'node:fs/promises'
+import { basename, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 
 export function getDefaultDownloadsDir(): string {
   return app.getPath('downloads')
@@ -24,9 +24,14 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function sanitizeFileName(fileName: string): string {
+export function sanitizeFileName(fileName: string): string {
   // A server-provided name is one component, never a path or NTFS data stream.
-  let safe = fileName.replace(/[\\/]/g, '_').replace(/\p{Cc}/gu, '_')
+  // Strip direction overrides (RTL attack) first so `evil\u202Efdp.exe` can't pose as `evilpdf.exe`.
+  let safe = fileName
+    .replace(/[\u202A-\u202E\u200E\u200F\u2066-\u2069]/g, '')
+    .replace(/[\\/]/g, '_')
+    .replace(/\p{Cc}/gu, '_')
+    .trim()
   if (process.platform === 'win32') {
     safe = safe.replace(/[<>:"|?*]/g, '_').replace(/[ .]+$/, '')
     if (/^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(safe)) safe = `_${safe}`
@@ -34,8 +39,43 @@ function sanitizeFileName(fileName: string): string {
   return !safe || /^\.+$/.test(safe) ? 'download' : safe
 }
 
-export async function ensureDirectory(directory: string): Promise<void> {
+/** Rejects a destination folder the app must never write to: relative paths,
+ * `~` shortcuts, drive roots and empty strings. Call before mkdir/disk-check. */
+export function validateDestinationDir(directory: string): void {
+  if (!directory || directory.trim() !== directory || directory.includes('~')) {
+    throw new Error('Pick a valid download folder first')
+  }
+  if (!isAbsolute(directory)) {
+    throw new Error('The download folder must be an absolute path')
+  }
+  const normalized = normalize(directory)
+  // Bare drive roots (C:\, /) are never a download target.
+  if (/^[A-Za-z]:[\\/]?$/.test(normalized) || normalized === '/') {
+    throw new Error('Pick a folder inside a drive, not the drive itself')
+  }
+}
+
+/** True when `child` really lives inside `parent` (after symlinks resolve).
+ * Used to confine manifest-provided paths before any write/delete. */
+export async function isPathInside(child: string, parent: string): Promise<boolean> {
   try {
+    const [realChild, realParent] = await Promise.all([realpath(child).catch(() => resolve(child)), realpath(parent)])
+    const root = join(realParent, '.')
+    return realChild === root || realChild.startsWith(`${root}${sep}`)
+  } catch {
+    return false
+  }
+}
+
+export async function ensureDirectory(directory: string): Promise<void> {
+  validateDestinationDir(directory)
+  try {
+    // Refuse to download through a symlinked folder without noticing:
+    // resolve it so staging + publish operate on the real location.
+    const st = await lstat(directory).catch(() => null)
+    if (st?.isSymbolicLink()) {
+      directory = await realpath(directory)
+    }
     await mkdir(directory, { recursive: true })
   } catch (error) {
     // Windows throws EPERM when trying to mkdir a drive root
@@ -53,6 +93,7 @@ export async function ensureDirectory(directory: string): Promise<void> {
  * also claims its corresponding final name, including after a restart.
  */
 export async function reserveDestinationPath(directory: string, fileName: string): Promise<string> {
+  validateDestinationDir(directory)
   await ensureDirectory(directory)
   fileName = sanitizeFileName(fileName)
   const ext = extname(fileName)
